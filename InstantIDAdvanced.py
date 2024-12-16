@@ -1,18 +1,16 @@
+"""InstantID Advanced implementation with face selection"""
 from .InstantID import (
-    NODE_CLASS_MAPPINGS, 
-    NODE_DISPLAY_NAME_MAPPINGS, 
-    ApplyInstantIDAdvanced,
+    ApplyInstantIDAdvanced as BaseApplyInstantID, 
+    extractFeatures as base_extract_features,
+    tensor_to_image,
     draw_kps
 )
-from .utils import tensor_to_image
 import torch
-import torch.nn.functional as F
-import numpy as np
-import PIL.Image
+import torchvision.transforms as T
 import comfy.model_management
 
-
 def extractFeatures(insightface, image, extract_kps=False, face_selection="largest"):
+    """Enhanced extractFeatures with face selection support"""
     face_img = tensor_to_image(image)
     out = []
 
@@ -35,13 +33,7 @@ def extractFeatures(insightface, image, extract_kps=False, face_selection="large
                     face = faces[-1]
 
                 if extract_kps:
-                    kps_img = draw_kps(face_img[i], face['kps'])
-                    # Convert PIL Image to numpy array first
-                    if isinstance(kps_img, PIL.Image.Image):
-                        kps_img = np.array(kps_img)
-                    # Convert numpy array to tensor
-                    kps_tensor = torch.from_numpy(kps_img).float().permute(2, 0, 1) / 255.0
-                    out.append(kps_tensor)
+                    out.append(draw_kps(face_img[i], face['kps']))
                 else:
                     out.append(torch.from_numpy(face['embedding']).unsqueeze(0))
 
@@ -51,34 +43,20 @@ def extractFeatures(insightface, image, extract_kps=False, face_selection="large
 
     if out:
         if extract_kps:
-            # Stack the already-converted tensors
-            out = torch.stack(out, dim=0)
-            # Convert to [batch, height, width, channels] format
-            out = out.permute(0, 2, 3, 1)
+            out = torch.stack(T.ToTensor()(out), dim=0).permute([0,2,3,1])
         else:
             out = torch.stack(out, dim=0)
     else:
-        if extract_kps:
-            # Create blank tensor if no faces detected
-            h, w, _ = face_img[0].shape
-            out = torch.zeros((1, h, w, 3), dtype=torch.float32)
-        else:
-            out = None
+        out = None
 
     return out
 
-class ApplyInstantIDAdvancedWithFaceSelection(ApplyInstantIDAdvanced):
+class ApplyInstantIDAdvanced(BaseApplyInstantID):
     @classmethod
     def INPUT_TYPES(s):
         original_types = super().INPUT_TYPES()
-        # Add face_selection as a new required input
         original_types["required"]["face_selection"] = (["largest", "smallest", "medium"], {"default": "largest"})
         return original_types
-
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING",)
-    RETURN_NAMES = ("MODEL", "positive", "negative",)
-    FUNCTION = "apply_instantid"
-    CATEGORY = "InstantID"
 
     def apply_instantid(self, instantid, insightface, control_net, image, model, positive, negative, 
                        ip_weight, cn_strength, start_at, end_at, noise, face_selection,
@@ -91,22 +69,20 @@ class ApplyInstantIDAdvancedWithFaceSelection(ApplyInstantIDAdvanced):
         self.dtype = dtype
         self.device = comfy.model_management.get_torch_device()
 
-        # Extract face embeddings
+        # Use enhanced extractFeatures with face selection
         face_embed = extractFeatures(insightface, image, face_selection=face_selection)
         if face_embed is None:
             raise Exception('Reference Image: No face detected.')
 
-        # Extract face keypoints
-        if image_kps is not None:
-            face_kps = extractFeatures(insightface, image_kps, extract_kps=True, face_selection=face_selection)
-        else:
-            face_kps = extractFeatures(insightface, image[0].unsqueeze(0), extract_kps=True, face_selection=face_selection)
+        face_kps = extractFeatures(insightface, 
+                                 image_kps if image_kps is not None else image[0].unsqueeze(0), 
+                                 extract_kps=True, 
+                                 face_selection=face_selection)
 
         if face_kps is None:
-            face_kps = torch.zeros_like(image if image_kps is None else image_kps)
+            face_kps = torch.zeros_like(image) if image_kps is None else image_kps
             print(f"\033[33mWARNING: No face detected in the keypoints image!\033[0m")
 
-        # Process embeddings
         clip_embed = face_embed
         if clip_embed.shape[0] > 1:
             if combine_embeds == 'average':
@@ -114,7 +90,6 @@ class ApplyInstantIDAdvancedWithFaceSelection(ApplyInstantIDAdvanced):
             elif combine_embeds == 'norm average':
                 clip_embed = torch.mean(clip_embed / torch.norm(clip_embed, dim=0, keepdim=True), dim=0).unsqueeze(0)
 
-        # Apply noise if needed
         if noise > 0:
             seed = int(torch.sum(clip_embed).item()) % 1000000007
             torch.manual_seed(seed)
@@ -122,17 +97,14 @@ class ApplyInstantIDAdvancedWithFaceSelection(ApplyInstantIDAdvanced):
         else:
             clip_embed_zeroed = torch.zeros_like(clip_embed)
 
-        # Initialize InstantID
         self.instantid = instantid
         self.instantid.to(self.device, dtype=self.dtype)
 
-        # Get image embeddings
         image_prompt_embeds, uncond_image_prompt_embeds = self.instantid.get_image_embeds(
             clip_embed.to(self.device, dtype=self.dtype), 
             clip_embed_zeroed.to(self.device, dtype=self.dtype)
         )
 
-        # Call parent implementation
         return super().apply_instantid(
             instantid=instantid,
             insightface=insightface,
@@ -146,16 +118,16 @@ class ApplyInstantIDAdvancedWithFaceSelection(ApplyInstantIDAdvanced):
             start_at=start_at,
             end_at=end_at,
             noise=noise,
-            image_kps=face_kps,
+            image_kps=image_kps,
             mask=mask,
             combine_embeds=combine_embeds
         )
 
-# Update the global mappings
-NODE_CLASS_MAPPINGS.update({
-    "ApplyInstantIDAdvancedWithFaceSelection": ApplyInstantIDAdvancedWithFaceSelection,
-})
+# Update node mappings
+NODE_CLASS_MAPPINGS = {
+    "ApplyInstantIDAdvanced": ApplyInstantIDAdvanced,
+}
 
-NODE_DISPLAY_NAME_MAPPINGS.update({
-    "ApplyInstantIDAdvancedWithFaceSelection": "Apply InstantID Advanced with Face Selection",
-})
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "ApplyInstantIDAdvanced": "Apply InstantID Advanced",
+}
