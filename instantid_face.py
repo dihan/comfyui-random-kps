@@ -1,22 +1,40 @@
-"""InstantID Advanced implementation with face selection"""
-from .InstantID import (
-    ApplyInstantIDAdvanced as BaseApplyInstantID, 
-    extractFeatures as base_extract_features,
-    tensor_to_image,
-    draw_kps
-)
+"""InstantID Face implementation with face selection and fixed keypoint extraction"""
 import torch
-import torchvision.transforms as T
+import numpy as np
 import comfy.model_management
+import torchvision.transforms as T
+import sys
+import os
+
+# Add InstantID path to system path
+INSTANTID_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'ComfyUI_InstantID'))
+if os.path.exists(INSTANTID_PATH):
+    if INSTANTID_PATH not in sys.path:
+        sys.path.append(INSTANTID_PATH)
+        print(f"Added InstantID path: {INSTANTID_PATH}")
+else:
+    print(f"Warning: InstantID path not found at {INSTANTID_PATH}")
+
+try:
+    from custom_nodes.ComfyUI_InstantID.InstantID import (
+        ApplyInstantIDAdvanced,
+        draw_kps,
+        tensor_to_image
+    )
+    print("Successfully imported InstantID components")
+except ImportError as e:
+    print(f"Error importing InstantID components: {str(e)}")
+    raise
 
 def extractFeatures(insightface, image, extract_kps=False, face_selection="largest"):
-    """Enhanced extractFeatures with face selection support"""
+    """Enhanced extractFeatures with face selection support and fixed keypoint extraction"""
     face_img = tensor_to_image(image)
     out = []
 
     insightface.det_model.input_size = (640,640) # reset the detection size
 
     for i in range(face_img.shape[0]):
+        batch_out = None
         for size in [(size, size) for size in range(640, 128, -64)]:
             insightface.det_model.input_size = size
             faces = insightface.get(face_img[i])
@@ -33,30 +51,34 @@ def extractFeatures(insightface, image, extract_kps=False, face_selection="large
                     face = faces[-1]
 
                 if extract_kps:
-                    out.append(draw_kps(face_img[i], face['kps']))
+                    # Draw keypoints and convert to tensor immediately
+                    kps_img = draw_kps(face_img[i], face['kps'])
+                    batch_out = T.ToTensor()(kps_img).permute(1, 2, 0)
                 else:
-                    out.append(torch.from_numpy(face['embedding']).unsqueeze(0))
+                    batch_out = torch.from_numpy(face['embedding']).unsqueeze(0)
 
                 if 640 not in size:
                     print(f"\033[33mINFO: InsightFace detection resolution lowered to {size}.\033[0m")
                 break
+        
+        if batch_out is not None:
+            out.append(batch_out)
 
     if out:
-        if extract_kps:
-            out = torch.stack(T.ToTensor()(out), dim=0).permute([0,2,3,1])
-        else:
-            out = torch.stack(out, dim=0)
-    else:
-        out = None
+        return torch.stack(out, dim=0)
+    return None
 
-    return out
-
-class ApplyInstantIDAdvanced(BaseApplyInstantID):
+class InstantIDFace(ApplyInstantIDAdvanced):
     @classmethod
     def INPUT_TYPES(s):
         original_types = super().INPUT_TYPES()
         original_types["required"]["face_selection"] = (["largest", "smallest", "medium"], {"default": "largest"})
         return original_types
+
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING",)
+    RETURN_NAMES = ("MODEL", "positive", "negative",)
+    FUNCTION = "apply_instantid"
+    CATEGORY = "InstantID"
 
     def apply_instantid(self, instantid, insightface, control_net, image, model, positive, negative, 
                        ip_weight, cn_strength, start_at, end_at, noise, face_selection,
@@ -123,11 +145,12 @@ class ApplyInstantIDAdvanced(BaseApplyInstantID):
             combine_embeds=combine_embeds
         )
 
-# Update node mappings
+# Node mappings
 NODE_CLASS_MAPPINGS = {
-    "ApplyInstantIDAdvanced": ApplyInstantIDAdvanced,
+    "InstantIDFace": InstantIDFace,
 }
 
+# Display names
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ApplyInstantIDAdvanced": "Apply InstantID Advanced",
+    "InstantIDFace": "InstantID Face",
 }

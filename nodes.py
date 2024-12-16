@@ -1,5 +1,7 @@
 """Node implementations for Face Keypoints"""
 from .face_keypoint_utils import FaceKeypointGenerator
+import sys
+import os
 import traceback
 
 class RandomFaceKeypoints:
@@ -40,20 +42,17 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 # Try to import InstantID nodes
 try:
-    print("Attempting to import InstantID Advanced...")
-    from .InstantIDAdvanced import ApplyInstantIDAdvanced
+    print("Attempting to import InstantID Face node...")
+    from .instantid_face import InstantIDFace, NODE_CLASS_MAPPINGS as INSTANTID_NODES
     
-    # Add InstantID Advanced node to mappings
-    NODE_CLASS_MAPPINGS.update({
-        "ApplyInstantIDAdvanced": ApplyInstantIDAdvanced,
-    })
-    
+    # Update our mappings with InstantID nodes
+    NODE_CLASS_MAPPINGS.update(INSTANTID_NODES)
     NODE_DISPLAY_NAME_MAPPINGS.update({
-        "ApplyInstantIDAdvanced": "Apply InstantID Advanced",
+        "InstantIDFace": "InstantID Face",
     })
-    print("Successfully added InstantID Advanced node")
+    print("Successfully added InstantID Face node")
     
 except Exception as e:
-    print(f"Error loading InstantID Advanced: {str(e)}")
+    print(f"Error loading InstantID Face node: {str(e)}")
     print(f"Full traceback: {traceback.format_exc()}")
     print("Only base keypoint nodes will be available.")
