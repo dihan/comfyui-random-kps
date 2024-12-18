@@ -58,21 +58,20 @@ def extractFeatures(insightface, image, extract_kps=False, face_selection="large
                         print(f"Skipping small face - Area: {area:.2f}, Bbox: {bbox}")
         
         if have_valid_detection and all_faces:
-            # Sort all detected faces by area
-            all_faces.sort(key=lambda x: x[0])  # Sort by area
+            # Sort all detected faces by area (largest to smallest)
+            all_faces.sort(key=lambda x: x[0], reverse=True)
             print(f"\nFound {len(all_faces)} valid faces:")
             for idx, (area, face) in enumerate(all_faces):
                 print(f"Face {idx} - Area: {area:.2f}, Bbox: {face['bbox']}")
             
             # Select face based on mode
-            if face_selection == "smallest":
-                selected_area, selected_face = all_faces[0]
-                print(f"Selected smallest face (area: {selected_area:.2f})")
-            elif face_selection == "medium" and len(all_faces) >= 3:
-                selected_area, selected_face = all_faces[len(all_faces)//2]
-                print(f"Selected medium face (area: {selected_area:.2f})")
+            if face_selection == "smallest" and len(all_faces) > 1:
+                # Select the second largest face if multiple faces exist
+                selected_area, selected_face = all_faces[1]
+                print(f"Selected second largest face (area: {selected_area:.2f})")
             else:
-                selected_area, selected_face = all_faces[-1]
+                # Default to largest face
+                selected_area, selected_face = all_faces[0]
                 print(f"Selected largest face (area: {selected_area:.2f})")
             
             bbox = selected_face['bbox']
@@ -107,7 +106,7 @@ class InstantIDFace(ApplyInstantIDAdvanced):
     @classmethod
     def INPUT_TYPES(s):
         original_types = super().INPUT_TYPES()
-        original_types["required"]["face_selection"] = (["largest", "smallest", "medium"], {"default": "largest"})
+        original_types["required"]["face_selection"] = (["largest", "smallest"], {"default": "largest"})
         return original_types
 
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING",)
