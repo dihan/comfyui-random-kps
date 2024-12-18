@@ -27,35 +27,57 @@ except ImportError as e:
     raise
 
 def extractFeatures(insightface, image, extract_kps=False, face_selection="largest"):
-    """Enhanced extractFeatures with face selection support and fixed keypoint extraction"""
+    """Enhanced extractFeatures with face selection support and debug logging"""
     face_img = tensor_to_image(image)
     out = []
 
-    insightface.det_model.input_size = (640,640) # reset the detection size
+    insightface.det_model.input_size = (640,640)  # reset detection size
+    print(f"Face selection mode: {face_selection}")
 
     for i in range(face_img.shape[0]):
         batch_out = None
         for size in [(size, size) for size in range(640, 128, -64)]:
             insightface.det_model.input_size = size
             faces = insightface.get(face_img[i])
+            
             if faces:
-                # Sort faces by size
+                # Print initial face detection info
+                print(f"\nDetected {len(faces)} faces")
+                
+                # Sort faces by size (area of bounding box)
                 faces = sorted(faces, key=lambda x:(x['bbox'][2]-x['bbox'][0])*(x['bbox'][3]-x['bbox'][1]))
+                
+                # Print face sizes for debugging
+                for idx, face in enumerate(faces):
+                    bbox = face['bbox']
+                    area = (bbox[2]-bbox[0])*(bbox[3]-bbox[1])
+                    print(f"Face {idx}: Area = {area:.2f}, Bbox = {bbox}")
                 
                 # Select face based on selection parameter
                 if face_selection == "smallest":
-                    face = faces[0]
-                elif face_selection == "medium" and len(faces) > 2:
-                    face = faces[len(faces)//2]
-                else:  # "largest" or any other case
-                    face = faces[-1]
-
+                    selected_face = faces[0]
+                    print("Selected smallest face")
+                elif face_selection == "medium" and len(faces) >= 3:
+                    selected_face = faces[len(faces)//2]
+                    print("Selected medium face")
+                else:  # "largest" or default case
+                    selected_face = faces[-1]
+                    print(f"Selected largest face (default or {face_selection} mode)")
+                
+                # Print selected face info
+                bbox = selected_face['bbox']
+                area = (bbox[2]-bbox[0])*(bbox[3]-bbox[1])
+                print(f"Selected face bbox: {bbox}, area: {area:.2f}")
+                
                 if extract_kps:
-                    # Draw keypoints and convert to tensor immediately
-                    kps_img = draw_kps(face_img[i], face['kps'])
+                    # Generate keypoint visualization
+                    kps_img = draw_kps(face_img[i], selected_face['kps'])
                     batch_out = T.ToTensor()(kps_img).permute(1, 2, 0)
+                    print("Generated keypoint visualization")
                 else:
-                    batch_out = torch.from_numpy(face['embedding']).unsqueeze(0)
+                    # Extract face embedding
+                    batch_out = torch.from_numpy(selected_face['embedding']).unsqueeze(0)
+                    print("Extracted face embedding")
 
                 if 640 not in size:
                     print(f"\033[33mINFO: InsightFace detection resolution lowered to {size}.\033[0m")
@@ -65,7 +87,12 @@ def extractFeatures(insightface, image, extract_kps=False, face_selection="large
             out.append(batch_out)
 
     if out:
-        return torch.stack(out, dim=0)
+        if extract_kps:
+            return torch.stack(out, dim=0).permute([0,2,3,1])
+        else:
+            return torch.stack(out, dim=0)
+    
+    print("No faces detected")
     return None
 
 class InstantIDFace(ApplyInstantIDAdvanced):
