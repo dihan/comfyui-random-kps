@@ -5,6 +5,7 @@ import comfy.model_management
 import torchvision.transforms as T
 import sys
 import os
+import cv2
 
 # Add InstantID path to system path
 INSTANTID_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'ComfyUI_InstantID'))
@@ -27,98 +28,112 @@ except ImportError as e:
     raise
 
 def extractFeatures(insightface, image, extract_kps=False, face_selection="largest"):
-    """Enhanced extractFeatures with consistent face selection across all processing stages"""
+    """Enhanced extractFeatures with improved batch handling and face detection"""
     face_img = tensor_to_image(image)
     out = []
-    selected_faces_info = {}  # Store selected face info for consistent processing
 
     print(f"\nFace selection mode: {face_selection}")
 
     for i in range(face_img.shape[0]):
-        batch_out = None
+        print(f"\nProcessing batch image {i+1}/{face_img.shape[0]}")
         all_faces = []
-        unique_faces = {}  # Keep track of unique faces with their details
-        have_valid_detection = False
+        best_detection = None
         
-        # Try multiple detection sizes to find all faces
+        # Try all detection sizes for each image
         for size in [(640, 640), (512, 512), (384, 384)]:
-            faces = insightface.get(face_img[i])
-            if faces and len(faces) > 0:
-                print(f"\nFound {len(faces)} faces at size {size}")
-                for face in faces:
-                    bbox = face['bbox']
-                    area = (bbox[2]-bbox[0])*(bbox[3]-bbox[1])
-                    width = bbox[2]-bbox[0]
-                    height = bbox[3]-bbox[1]
-                    center_x = (bbox[0] + bbox[2]) / 2
-                    center_y = (bbox[1] + bbox[3]) / 2
+            try:
+                # Resize image to current detection size while maintaining aspect ratio
+                current_img = face_img[i].copy()
+                h, w = current_img.shape[:2]
+                scale = min(size[0]/w, size[1]/h)
+                new_w, new_h = int(w*scale), int(h*scale)
+                resized_img = cv2.resize(current_img, (new_w, new_h))
+                
+                # Detect faces at current size
+                faces = insightface.get(resized_img)
+                
+                if faces and len(faces) > 0:
+                    print(f"Found {len(faces)} faces at size {size}")
                     
-                    # Basic validation
-                    if width > 20 and height > 20:
-                        # Create a unique identifier for this face
-                        face_id = f"{center_x:.0f}_{center_y:.0f}"
+                    # Scale bbox and keypoints back to original size
+                    for face in faces:
+                        # Scale bbox back to original size
+                        face['bbox'] = [
+                            face['bbox'][0]/scale,
+                            face['bbox'][1]/scale,
+                            face['bbox'][2]/scale,
+                            face['bbox'][3]/scale
+                        ]
                         
-                        # Only add if we haven't seen this face or if it's a better detection
-                        if face_id not in unique_faces or area > unique_faces[face_id][0]:
-                            print(f"Valid unique face found - Area: {area:.2f}, Center: ({center_x:.0f}, {center_y:.0f})")
-                            unique_faces[face_id] = (area, face, bbox)
-                            have_valid_detection = True
-                        else:
-                            print(f"Skipping duplicate/smaller face at position {face_id}")
-                    else:
-                        print(f"Skipping small face - Area: {area:.2f}, Bbox: {bbox}")
+                        # Scale keypoints back to original size
+                        if 'kps' in face:
+                            face['kps'] = face['kps'] / scale
+                        
+                        bbox = face['bbox']
+                        area = (bbox[2]-bbox[0])*(bbox[3]-bbox[1])
+                        width = bbox[2]-bbox[0]
+                        height = bbox[3]-bbox[1]
+                        
+                        if width > 20 and height > 20:  # Basic size validation
+                            all_faces.append((area, face))
+                            print(f"Valid face found - Area: {area:.2f}, Bbox: {bbox}")
+                
+            except Exception as e:
+                print(f"Error during face detection at size {size}: {str(e)}")
+                continue
         
-        # Convert unique faces to list and sort
-        all_faces = [(area, face, bbox) for area, face, bbox in unique_faces.values()]
-        all_faces.sort(key=lambda x: x[0], reverse=True)
-        
-        if have_valid_detection and all_faces:
-            print(f"\nFound {len(all_faces)} unique valid faces:")
-            for idx, (area, face, bbox) in enumerate(all_faces):
-                print(f"Face {idx} - Area: {area:.2f}, Bbox: {bbox}")
+        if all_faces:
+            # Sort faces by area
+            all_faces.sort(key=lambda x: x[0], reverse=True)
+            print(f"Found {len(all_faces)} valid faces in total")
             
             # Select face based on mode
-            if face_selection == "smallest" and len(all_faces) > 0:
-                selected_area, selected_face, selected_bbox = all_faces[-1]  # Get smallest face
+            if face_selection == "smallest" and len(all_faces) > 1:
+                selected_area, selected_face = all_faces[-1]
                 print(f"Selected smallest face (area: {selected_area:.2f})")
             else:
-                selected_area, selected_face, selected_bbox = all_faces[0]  # Get largest face
+                selected_area, selected_face = all_faces[0]
                 print(f"Selected largest face (area: {selected_area:.2f})")
             
-            print(f"Selected face bbox: {selected_bbox}")
-            
-            # Store selected face info for consistent processing
-            selected_faces_info[i] = {
-                'bbox': selected_bbox,
-                'area': selected_area,
-                'center': ((selected_bbox[0] + selected_bbox[2])/2, (selected_bbox[1] + selected_bbox[3])/2)
-            }
-            
+            # Process selected face
             if extract_kps:
-                kps_img = draw_kps(face_img[i], selected_face['kps'])
-                batch_out = T.ToTensor()(kps_img).permute(1, 2, 0)
-                print("Generated keypoint visualization")
+                try:
+                    kps_img = draw_kps(face_img[i], selected_face['kps'])
+                    batch_out = T.ToTensor()(kps_img).permute(1, 2, 0)
+                    print("Generated keypoint visualization")
+                except Exception as e:
+                    print(f"Error generating keypoints: {str(e)}")
+                    batch_out = torch.zeros_like(image[0])
             else:
-                batch_out = torch.from_numpy(selected_face['embedding']).unsqueeze(0)
-                print("Extracted face embedding")
+                try:
+                    batch_out = torch.from_numpy(selected_face['embedding']).unsqueeze(0)
+                    print("Extracted face embedding")
+                except Exception as e:
+                    print(f"Error extracting embedding: {str(e)}")
+                    continue
             
             out.append(batch_out)
         else:
-            print("No valid faces detected in image")
+            print(f"No valid faces detected in batch image {i+1}")
             if extract_kps:
-                return torch.zeros_like(image)
-            continue
+                out.append(torch.zeros_like(image[0]))
+            else:
+                print("Skipping batch image due to no face detection")
 
     if len(out) > 0:
-        if extract_kps:
+        try:
             return torch.stack(out, dim=0)
-        else:
-            return torch.stack(out, dim=0), selected_faces_info
+        except Exception as e:
+            print(f"Error stacking outputs: {str(e)}")
+            if extract_kps:
+                return torch.zeros_like(image)
+            return None
     else:
         if extract_kps:
             return torch.zeros_like(image)
-        return None, {}
-
+        return None
+    
+    
 class InstantIDFace(ApplyInstantIDAdvanced):
     @classmethod
     def INPUT_TYPES(s):
