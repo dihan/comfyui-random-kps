@@ -141,9 +141,10 @@ class InstantIDFace(ApplyInstantIDAdvanced):
         original_types["required"]["face_selection"] = (["largest", "smallest"], {"default": "largest"})
         return original_types
 
+
     def apply_instantid(self, instantid, insightface, control_net, image, model, positive, negative, 
-                       ip_weight, cn_strength, start_at, end_at, noise, face_selection,
-                       image_kps=None, mask=None, combine_embeds='average'):
+                        ip_weight, cn_strength, start_at, end_at, noise, face_selection,
+                        image_kps=None, mask=None, combine_embeds='average'):
         
         dtype = comfy.model_management.unet_dtype()
         if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
@@ -154,7 +155,7 @@ class InstantIDFace(ApplyInstantIDAdvanced):
 
         # Extract face features with consistent face selection
         face_embed, selected_faces = extractFeatures(insightface, image, face_selection=face_selection)
-        if face_embed is None:
+        if face_embed is None or all(face is None for face in selected_faces):
             print("\033[33mWARNING: No faces detected in reference image. Processing will be limited.\033[0m")
             return super().apply_instantid(
                 instantid=instantid,
@@ -174,11 +175,9 @@ class InstantIDFace(ApplyInstantIDAdvanced):
                 combine_embeds=combine_embeds
             )
 
-        # Extract keypoints using same face selection mode with stored face info
-        if image_kps is not None:
-            face_kps = extractFeatures(insightface, image_kps, extract_kps=True, face_selection=face_selection)
-        else:
-            face_kps = extractFeatures(insightface, image, extract_kps=True, face_selection=face_selection)
+        # Extract keypoints using same face selection mode
+        kps_image = image_kps if image_kps is not None else image[0].unsqueeze(0)
+        face_kps, _ = extractFeatures(insightface, kps_image, extract_kps=True, face_selection=face_selection)
 
         if face_kps is None:
             face_kps = torch.zeros_like(image) if image_kps is None else image_kps
@@ -219,10 +218,11 @@ class InstantIDFace(ApplyInstantIDAdvanced):
             start_at=start_at,
             end_at=end_at,
             noise=noise,
-            image_kps=face_kps,  # Use the consistently selected face keypoints
+            image_kps=face_kps,
             mask=mask,
             combine_embeds=combine_embeds
         )
+    
 # Node mappings
 NODE_CLASS_MAPPINGS = {
     "InstantIDFace": InstantIDFace,
