@@ -195,8 +195,8 @@ class InstantIDFace(ApplyInstantIDAdvanced):
     CATEGORY = "InstantID"
 
     def apply_instantid(self, instantid, insightface, control_net, image, model, positive, negative, 
-                       ip_weight, cn_strength, start_at, end_at, noise,
-                       image_kps=None, mask=None, combine_embeds='average', face_selection_method='largest'):
+                    ip_weight, cn_strength, start_at, end_at, noise,
+                    image_kps=None, mask=None, combine_embeds='average', face_selection_method='largest'):
         try:
             print("\n=== Starting InstantID Face Processing ===")
             print(f"Face selection method: {face_selection_method}")
@@ -211,14 +211,14 @@ class InstantIDFace(ApplyInstantIDAdvanced):
             # Create modified insightface that enforces our face selection
             modified_insightface = ModifiedInsightFace(insightface, face_selection_method)
 
-            # Use modified insightface for feature extraction
+            # Extract face features using selected method
             face_embed = extract_features_with_selection(modified_insightface, image, selection_method=face_selection_method)
             
             if face_embed is None:
                 print("\033[33mWARNING: No faces detected in reference image. Processing will be limited.\033[0m")
                 return super().apply_instantid(
                     instantid=instantid,
-                    insightface=modified_insightface,  # Use modified insightface
+                    insightface=modified_insightface,
                     control_net=control_net,
                     image=image,
                     model=model,
@@ -246,38 +246,62 @@ class InstantIDFace(ApplyInstantIDAdvanced):
                 face_kps = torch.zeros_like(image) if image_kps is None else image_kps
                 print(f"\033[33mWARNING: No face detected in the keypoints image!\033[0m")
 
+            # Modified embedding processing for better color preservation
             clip_embed = face_embed
             if clip_embed.shape[0] > 1:
                 if combine_embeds == 'average':
-                    clip_embed = torch.mean(clip_embed, dim=0).unsqueeze(0)
+                    # Normalize before averaging to preserve feature scales
+                    norms = torch.norm(clip_embed, dim=-1, keepdim=True)
+                    normalized_embeds = clip_embed / norms
+                    clip_embed = torch.mean(normalized_embeds, dim=0).unsqueeze(0)
+                    # Rescale to original magnitude
+                    avg_norm = torch.mean(norms)
+                    clip_embed = clip_embed * avg_norm
                 elif combine_embeds == 'norm average':
-                    clip_embed = torch.mean(clip_embed / torch.norm(clip_embed, dim=0, keepdim=True), dim=0).unsqueeze(0)
+                    clip_embed = torch.mean(clip_embed / torch.norm(clip_embed, dim=-1, keepdim=True), dim=0).unsqueeze(0)
+
+            # Print embedding statistics for debugging
+            print(f"Embedding stats before noise - Mean: {clip_embed.mean():.4f}, Std: {clip_embed.std():.4f}")
 
             if noise > 0:
+                # Modified noise application
                 seed = int(torch.sum(clip_embed).item()) % 1000000007
                 torch.manual_seed(seed)
-                clip_embed_zeroed = noise * torch.rand_like(clip_embed)
+                
+                # Generate noise that preserves embedding statistics
+                noise_tensor = torch.randn_like(clip_embed)
+                noise_tensor = noise_tensor * clip_embed.std() + clip_embed.mean()
+                
+                # Blend original embedding with noise
+                clip_embed_zeroed = noise * noise_tensor + (1 - noise) * torch.zeros_like(clip_embed)
+                
+                print(f"Noise blend stats - Mean: {clip_embed_zeroed.mean():.4f}, Std: {clip_embed_zeroed.std():.4f}")
             else:
                 clip_embed_zeroed = torch.zeros_like(clip_embed)
 
             self.instantid = instantid
             self.instantid.to(self.device, dtype=self.dtype)
 
+            # Generate image embeddings
             image_prompt_embeds, uncond_image_prompt_embeds = self.instantid.get_image_embeds(
                 clip_embed.to(self.device, dtype=self.dtype), 
                 clip_embed_zeroed.to(self.device, dtype=self.dtype)
             )
 
+            # Adjust strength parameters for better stability
+            actual_ip_weight = min(ip_weight, 1.0) if ip_weight > 0 else ip_weight
+            actual_cn_strength = min(cn_strength * 0.8, 1.0) if cn_strength > 0 else cn_strength
+
             return super().apply_instantid(
                 instantid=instantid,
-                insightface=modified_insightface,  # Use modified insightface
+                insightface=modified_insightface,
                 control_net=control_net,
                 image=image,
                 model=model,
                 positive=positive,
                 negative=negative,
-                ip_weight=ip_weight,
-                cn_strength=cn_strength,
+                ip_weight=actual_ip_weight,
+                cn_strength=actual_cn_strength,
                 start_at=start_at,
                 end_at=end_at,
                 noise=noise,
@@ -285,11 +309,6 @@ class InstantIDFace(ApplyInstantIDAdvanced):
                 mask=mask,
                 combine_embeds=combine_embeds
             )
-
-        except Exception as e:
-            print(f"Error in apply_instantid: {str(e)}")
-            print(f"Full traceback: {traceback.format_exc()}")
-            raise
 
 # Node mappings
 NODE_CLASS_MAPPINGS = {
