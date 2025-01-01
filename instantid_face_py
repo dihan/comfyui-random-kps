@@ -1,0 +1,175 @@
+import torch
+import comfy.model_management
+import numpy as np
+import sys
+import os
+import traceback
+
+# Add InstantID path to system path
+INSTANTID_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'ComfyUI_InstantID'))
+if os.path.exists(INSTANTID_PATH):
+    if INSTANTID_PATH not in sys.path:
+        sys.path.append(INSTANTID_PATH)
+        print(f"Added InstantID path: {INSTANTID_PATH}")
+else:
+    print(f"Warning: InstantID path not found at {INSTANTID_PATH}")
+
+# Import InstantID components
+try:
+    from custom_nodes.ComfyUI_InstantID.InstantID import (
+        ApplyInstantIDAdvanced,
+        draw_kps,
+        tensor_to_image
+    )
+    print("Successfully imported InstantID components")
+except ImportError as e:
+    print(f"Error importing InstantID components: {str(e)}")
+    raise
+
+class InstantIDFace(ApplyInstantIDAdvanced):
+    @classmethod
+    def INPUT_TYPES(s):
+        base_inputs = super().INPUT_TYPES()
+        # Add analysis_models and face_index to the required inputs
+        base_inputs["required"].update({
+            "analysis_models": ("ANALYSIS_MODELS",),
+            "face_index": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 1}),
+        })
+        return base_inputs
+
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING",)
+    RETURN_NAMES = ("MODEL", "positive", "negative",)
+    FUNCTION = "apply_instantid"
+    CATEGORY = "InstantID"
+
+    def apply_instantid(self, instantid, analysis_models, insightface, control_net, image, model, 
+                       positive, negative, face_index, ip_weight, cn_strength, start_at, end_at, 
+                       noise, image_kps=None, mask=None, combine_embeds='average'):
+        try:
+            dtype = comfy.model_management.unet_dtype()
+            if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
+                dtype = torch.float16 if comfy.model_management.should_use_fp16() else torch.float32
+            
+            self.dtype = dtype
+            self.device = comfy.model_management.get_torch_device()
+
+            # Convert image tensor to format needed by analysis_models
+            face_img = tensor_to_image(image)
+            
+            # Get all faces using analysis_models
+            faces = analysis_models.get_face(face_img[0])
+            if faces is None or len(faces) == 0:
+                print("\033[33mWARNING: No faces detected in reference image. Processing will be limited.\033[0m")
+                return super().apply_instantid(
+                    instantid=instantid,
+                    insightface=insightface,
+                    control_net=control_net,
+                    image=image,
+                    model=model,
+                    positive=positive,
+                    negative=negative,
+                    ip_weight=ip_weight,
+                    cn_strength=cn_strength,
+                    start_at=start_at,
+                    end_at=end_at,
+                    noise=noise,
+                    image_kps=image_kps,
+                    mask=mask,
+                    combine_embeds=combine_embeds
+                )
+
+            # Ensure face_index is within bounds
+            if face_index >= len(faces):
+                print(f"\033[33mWARNING: Requested face index {face_index} exceeds number of detected faces ({len(faces)}). Using last face.\033[0m")
+                face_index = len(faces) - 1
+
+            # Get the selected face's embedding
+            if hasattr(analysis_models, 'face_analysis'):  # InsightFace
+                face_embed = torch.from_numpy(faces[face_index].normed_embedding).unsqueeze(0)
+            else:  # DLib
+                shape = analysis_models.shape_predictor(face_img[0], faces[face_index])
+                face_embed = torch.from_numpy(
+                    np.array(analysis_models.face_recognition.compute_face_descriptor(face_img[0], shape))
+                ).unsqueeze(0)
+
+            # Extract keypoints for the selected face
+            if image_kps is None:
+                if hasattr(analysis_models, 'face_analysis'):  # InsightFace
+                    kps = faces[face_index].kps
+                else:  # DLib
+                    shape = analysis_models.shape_predictor(face_img[0], faces[face_index])
+                    # Convert DLib keypoints to format expected by InstantID
+                    kps = np.array([
+                        [(shape.part(0).x + shape.part(1).x) // 2, (shape.part(0).y + shape.part(1).y) // 2],  # left eye
+                        [(shape.part(2).x + shape.part(3).x) // 2, (shape.part(2).y + shape.part(3).y) // 2],  # right eye
+                        [shape.part(4).x, shape.part(4).y],  # nose
+                    ])
+                
+                face_kps = draw_kps(face_img[0], kps)
+                face_kps = torch.from_numpy(np.array(face_kps)).float() / 255.0
+                face_kps = face_kps.permute(2, 0, 1).unsqueeze(0)
+            else:
+                face_kps = image_kps
+
+            # Apply noise if specified
+            if noise > 0:
+                seed = int(torch.sum(face_embed).item()) % 1000000007
+                torch.manual_seed(seed)
+                clip_embed_zeroed = noise * torch.rand_like(face_embed)
+            else:
+                clip_embed_zeroed = torch.zeros_like(face_embed)
+
+            # Get embeddings from InstantID model
+            self.instantid = instantid
+            self.instantid.to(self.device, dtype=self.dtype)
+
+            image_prompt_embeds, uncond_image_prompt_embeds = self.instantid.get_image_embeds(
+                face_embed.to(self.device, dtype=self.dtype), 
+                clip_embed_zeroed.to(self.device, dtype=self.dtype)
+            )
+
+            # Print info about selected face
+            bbox = faces[face_index].bbox if hasattr(analysis_models, 'face_analysis') else faces[face_index]
+            if hasattr(analysis_models, 'face_analysis'):
+                area = (bbox[2]-bbox[0])*(bbox[3]-bbox[1])
+                center_x = (bbox[0] + bbox[2])/2
+                center_y = (bbox[1] + bbox[3])/2
+            else:  # DLib
+                area = bbox.area()
+                center_x = (bbox.left() + bbox.right())/2
+                center_y = (bbox.top() + bbox.bottom())/2
+
+            print(f"\033[96mSelected face {face_index}: Area = {area:.2f}, Position = ({center_x:.1f}, {center_y:.1f})\033[0m")
+
+            # Complete the InstantID processing
+            return super().apply_instantid(
+                instantid=instantid,
+                insightface=insightface,
+                control_net=control_net,
+                image=image,
+                model=model,
+                positive=positive,
+                negative=negative,
+                ip_weight=ip_weight,
+                cn_strength=cn_strength,
+                start_at=start_at,
+                end_at=end_at,
+                noise=noise,
+                image_kps=face_kps,
+                mask=mask,
+                combine_embeds=combine_embeds
+            )
+
+        except Exception as e:
+            print(f"Error in apply_instantid: {str(e)}")
+            print(f"Full traceback: {traceback.format_exc()}")
+            raise
+
+# Node mappings
+NODE_CLASS_MAPPINGS = {
+    "InstantIDFace": InstantIDFace,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "InstantIDFace": "InstantID Face w/Analysis",
+}
